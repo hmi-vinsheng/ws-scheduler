@@ -1,107 +1,120 @@
-# Setting up the job poller from scratch
+# Setting up from scratch
 
-Everything below was run to build the live `mhc-job-poll` app. Copy-paste it in order and
-you get an identical one.
+Creating the Azure resources and deploying, using only the **Azure Functions extension for
+VS Code**. No Azure CLI, no Core Tools, no `npm install -g`.
 
 You need: an Azure subscription you are Owner on, and about ten minutes.
 
-## 0. Tools, once per machine
+## 0. Once per machine
 
-    pipx install azure-cli
-    az login --use-device-code
-
-`pipx` installs to your home directory, so no `sudo` -- which matters on a locked-down work
-laptop. The official `curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash` works too if
-you have root.
-
-`--use-device-code` matters in WSL: plain `az login` tries to open a Linux browser that is
-not there. It prints a code, you paste it into a browser on Windows.
-
-Check you landed in the right place:
-
-    az account show --query "{sub:name, id:id}" -o table
+Install the **Azure Functions** extension (`ms-azuretools.vscode-azurefunctions`) -- it is
+already listed in `.vscode/extensions.json`, so VS Code will offer it when you open this
+folder. Then sign in: **Azure icon in the sidebar -> Sign in to Azure**.
 
 ## 1. Register the storage provider
 
-    az provider register -n Microsoft.Storage --wait
-
-**Do this first.** A subscription that has never created a storage account has this
-provider unregistered, and every storage command then fails with:
+**This is the one thing the extension cannot do for you**, and skipping it produces a
+thoroughly misleading error:
 
     (SubscriptionNotFound) Subscription <guid> was not found.
 
-which sends you hunting for a login or subscription problem that does not exist. One time
-per subscription, then never again.
+which sends you hunting for a login problem that does not exist. A subscription that has
+never created a storage account has the provider unregistered. Fix it once, in the portal:
 
-## 2. Create the resources
+**Subscription -> Settings -> Resource providers -> search `Microsoft.Storage` -> Register**
 
-    RG=Cron_group
-    LOC=southeastasia
-    APP=mhc-job-poll
-    STORAGE=mhccronstore$RANDOM      # 3-24 chars, lowercase and digits, globally unique
+Never again after that.
 
-    az group create -n $RG -l $LOC
+## 2. Create the Function App
 
-    az storage account create -n $STORAGE -g $RG -l $LOC --sku Standard_LRS
+**Azure sidebar -> Resources -> `+` -> Create Function App in Azure... (Advanced)**
 
-    az functionapp create -n $APP -g $RG -s $STORAGE \
-      --consumption-plan-location $LOC \
-      --runtime node --runtime-version 24 --functions-version 4
+The advanced flow is worth it -- the quick one picks defaults you would have to undo:
 
-Three things that will bite you:
+| Prompt | Answer |
+|---|---|
+| Name | `ws-scheduler` -- **globally unique across all of Azure**, not just your subscription |
+| Runtime | Node.js 24 (20 is end-of-life and is refused) |
+| OS | Linux |
+| Plan | Consumption |
+| Resource group | `Cron_group` (or create one) |
+| Storage account | **create new** -- this is what sets `AzureWebJobsStorage` |
+| Application Insights | **create new** -- without it the Monitor tab is blank |
+| Region | Southeast Asia |
 
-- **The app name is globally unique across all of Azure**, not just your subscription.
-  `Cron` is taken. A deleted app also holds its name for a while, so you cannot immediately
-  reuse one you just removed.
-- **Node 20 is end-of-life** (April 2026) and `functionapp create` refuses it outright. Use
-  24. The handler is plain CommonJS with core modules, so the version does not matter to it.
-- **Creating the storage account here is what sets `AzureWebJobsStorage` correctly.** Skip
-  it, or point at a dead account, and the timer fails at startup with
-  `Could not create BlobContainerClient for ScheduleMonitor` -- the handler never runs, and
-  the invocation fails in 0ms.
+Creating the storage account here is what avoids `Could not create BlobContainerClient for
+ScheduleMonitor`: the timer keeps its state in a blob, and with no storage the handler never
+runs at all -- the invocation fails in 0ms.
 
-Application Insights is created automatically and wired up. You need it: Function Apps log
-there, not to the filesystem, so `az webapp log tail` shows nothing useful.
+A deleted app holds its name for a while, so you cannot immediately reuse one you just
+removed.
 
 ## 3. Configure it
 
-    az functionapp config appsettings set -n $APP -g $RG --settings \
-      'JOB_POLL_TARGETS=[{"name":"uat","url":"https://www-uat-33.mhcasia.net/mhc/ws-cj/job/due"}]' \
-      'JOB_POLL_USER=<user>' \
-      'JOB_POLL_PASSWORD=<password>'
+**Azure sidebar -> your app -> Application Settings -> right-click -> Add New Setting**,
+once per setting:
+
+    JOB_POLL_TARGETS     [{"name":"uat","url":"https://<host>/mhc/ws-cj/job/due"}]
+    JOB_POLL_USER        <user>
+    JOB_POLL_PASSWORD    <password>
 
 An app setting **is** `process.env` inside the function -- that is the whole mechanism.
-`JOB_POLL_TARGETS` must be one line of JSON; in the portal you paste it raw, but in
-`local.settings.json` the inner quotes need escaping, because there it is JSON inside JSON.
 
-Setting these restarts the app. That is fine, and it is required -- the value is not live
-until it has.
+`JOB_POLL_TARGETS` must be **one line** of JSON. Paste it raw here; in
+`local.settings.json` the inner quotes need escaping, because there it is JSON inside JSON.
+That inconsistency is the portal's, not ours.
+
+Prefer `JOB_POLL_BASIC` with a Key Vault reference for anything but a test:
+
+    JOB_POLL_BASIC = @Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/ws2-basic/)
+
+The code prefers it over user/password. It needs a managed identity with **Get** on the
+secret -- and grant that BEFORE setting the value, because a failed resolution is cached for
+up to 24 hours and only a restart clears it.
 
 ## 4. Deploy
 
-    ./deploy.sh
+Run the tests first -- nothing in the deploy path does it for you:
 
-Runs the tests, packages, and zip-deploys. It refuses to deploy if a test fails.
+    node test/scenarios.js
 
-Override the target without editing anything:
+Then in the **Azure** sidebar, under **Resources -> Function App**, right-click
+**`ws-scheduler`** and choose **Deploy to Function App...**
 
-    APP=other-app RG=other-rg ./deploy.sh
+![Deploy to Function App in the Azure sidebar](setup_guide_image/Screenshot%201.jpg)
+
+Confirm the overwrite prompt:
+
+![Confirm the deployment](setup_guide_image/Screenshot%202.png)
+
+"Cannot be undone" means the previous *deployment* is replaced -- the app settings, the
+storage account and the `job_schedule` table are all untouched. The credentials warning is
+about `JOB_POLL_PASSWORD` living as an app setting; the Key Vault reference in step 3 is the
+answer to it.
+
+The preDeployTask then runs, and may report an error:
+
+![preDeployTask warning](setup_guide_image/Screenshot%203.png)
+
+That is the deprecated `--production` flag, not a real failure. npm 10 prints
+`npm warn config production Use --omit=dev instead.` to **stderr**, and VS Code treats any
+stderr from a task as an error -- while the task itself exits 0 and does its job.
+`.vscode/tasks.json` now uses `npm prune --omit=dev`, which is silent, so this dialog should
+not appear. If it does, **Deploy Anyway** is safe: the task only strips devDependencies, and
+this project has none.
+
+The extension runs `npm install` and ships the folder. `local.settings.json` and `test/` are
+excluded by `.funcignore`: the first holds credentials, and neither belongs in `wwwroot`.
+
+Deploying does **not** push app settings. A new setting has to be added in step 3 as well,
+or the next run reports `CONFIGURATION ERROR`.
 
 ## 5. Check it works
 
-Trigger it immediately rather than waiting for the next minute:
+**Azure sidebar -> your app -> Functions -> JobPoll -> right-click -> Execute Function Now**
 
-    KEY=$(az functionapp keys list -n $APP -g $RG --query masterKey -o tsv)
-    curl -X POST "https://$APP.azurewebsites.net/admin/functions/TimerTrigger1" \
-      -H "x-functions-key: $KEY" -H "Content-Type: application/json" -d '{"input":""}'
-
-A `202` means accepted, not that the poll succeeded -- read the logs for that. Give
-Application Insights a couple of minutes; `requests` appear before `traces` do.
-
-    az monitor app-insights query --app $APP -g $RG --analytics-query \
-      "traces | where timestamp > ago(30m) | where message startswith '[jobpoll]' \
-       | project timestamp, message | order by timestamp asc" \
-      --query "tables[0].rows" -o tsv
+This fires the timer immediately instead of waiting for the next minute. Then
+**right-click -> Start Streaming Logs**.
 
 Healthy output, once a minute:
 
@@ -112,10 +125,9 @@ And on a night when something is due:
     [jobpoll] uat: STARTED 1 on node=MHCPDC-UWA-C10 [clinic-check] (60ms)
     [jobpoll] JOBS uat=[clinic-check]
 
-Confirm the schedule was registered as you meant:
-
-    az functionapp function list -n $APP -g $RG \
-      --query "[].{name:name, schedule:config.bindings[0].schedule, useMonitor:config.bindings[0].useMonitor}" -o table
+Streaming logs drop connections and can print "No new trace in the past 1 min(s)" while the
+function is running perfectly well. For the authoritative record use the portal's
+**Monitor -> Invocations**, or query Application Insights.
 
 ## Reading a failure
 
@@ -124,7 +136,7 @@ The log line names the layer, so you do not have to guess:
 | Line | Layer | Fix |
 |---|---|---|
 | `CONFIGURATION ERROR` | app settings | a setting is missing or malformed |
-| `could not connect after ~5000ms` | network | firewall dropping packets -- allowlist the outbound IPs |
+| `could not connect after ~5000ms` | network | packets dropped -- allowlist the outbound IPs |
 | `connected but no response after 25000ms` | the app | stalled database; check `job_schedule` for a row on `lastStatus='RUNNING'` |
 | `401 UNAUTHORIZED` | credential | wrong password, or the IP is not allowed in `verifyRequestAuthorize` |
 | `404 NOT FOUND` | URL | wrong tenant context path |
@@ -135,21 +147,20 @@ about 5 seconds and never reaches 25**, because Node abandons the attempt regard
 configured cap. Five seconds means the packets are not arriving; twenty-five means they are
 and the app went quiet.
 
-If the network one shows up, get the outbound addresses and have them allowlisted:
-
-    az functionapp show -n $APP -g $RG --query possibleOutboundIpAddresses -o tsv
-
-Use `possibleOutboundIpAddresses`, not `outboundIpAddresses`. The second is only what is in
-use right now; the app moves within the first set when it scales, and allowlisting only the
-active few produces a maddening "works sometimes" pattern.
+For the network case you need the app's outbound addresses. The extension does not show
+them: **portal -> your app -> Settings -> Properties**, and copy **both** *Outbound IP
+addresses* **and** *Additional Outbound IP addresses*. The second list is the one that
+catches you -- allowlist only the first and it works until the app moves, which looks
+exactly like an intermittent fault.
 
 ## Things worth not relearning
 
-- **Log stream lies.** It drops connections and prints `No new trace in the past 1 min(s)`
-  while the function is running fine. Trust **Monitor -> Invocations** or the query above.
-- **The Integration UI rewrites `function.json`** and can drop properties it does not know
-  about, including `useMonitor`. Edit `function.json` directly, or deploy with `deploy.sh`.
-- **The folder name inside the zip becomes the function name in Azure.** Only that one
-  folder is deployed, so an `index.js` that `require`s a sibling folder fails with
-  `Cannot find module`.
-- **Portal edits to `function.json` do not always reload the host.** Restart after one.
+- **Log streaming lies.** It drops connections and reports silence while the function runs.
+  Trust **Monitor -> Invocations**.
+- **The function name comes from `app.timer('JobPoll', ...)`** in `src/index.js`, not from
+  the folder. Under the v3 model it was the folder name, which is why moving files used to
+  rename the function.
+- **There is no `function.json` under v4.** The schedule and `useMonitor` are in that same
+  `app.timer` call, so the portal's Integration UI cannot silently rewrite them -- which is
+  what used to drop `useMonitor` and bring the ScheduleMonitor failure back.
+- **Node 20 is end-of-life** (April 2026); creation is refused. Use 24.

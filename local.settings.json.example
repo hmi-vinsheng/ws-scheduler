@@ -4,7 +4,6 @@
     "FUNCTIONS_WORKER_RUNTIME": "node",
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
 
-    "JOB_POLL_SCHEDULE": "0 * * * * *",
     "JOB_POLL_TARGETS": "[{\"name\":\"mhc@local\",\"url\":\"http://localhost:8080/mhc/ws-cj/job/due\"}]",
     "JOB_POLL_USER": "REPLACE_ME",
     "JOB_POLL_PASSWORD": "REPLACE_ME"

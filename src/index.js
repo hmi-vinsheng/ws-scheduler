@@ -23,6 +23,13 @@ const { app } = require('@azure/functions');
 const REQUEST_TIMEOUT_MS = 25000;
 
 /**
+ * How often to poll. Deliberately not an app setting: the app decides what is DUE from its
+ * own job_schedule table, so this only controls how often it is asked. Once a minute is
+ * right, and a missed poll is absorbed by the app's 30-minute grace window.
+ */
+const SCHEDULE = '0 */1 * * * *';
+
+/**
  * Prefix on every line, so Application Insights can be filtered to just this function:
  *
  *   traces | where message startswith "[jobpoll]"
@@ -289,8 +296,7 @@ async function jobPoll(myTimer, context) {
     }
 
     context.trace(
-        `${TAG} polling ${targets.length} target(s) on schedule ` +
-        `"${process.env.JOB_POLL_SCHEDULE || '(unset)'}": ` +
+        `${TAG} polling ${targets.length} target(s) on schedule "${SCHEDULE}": ` +
         targets.map(function (t) { return t.name; }).join(', ')
     );
 
@@ -358,7 +364,7 @@ async function jobPoll(myTimer, context) {
 // admin URL and in Application Insights -- NOT the folder name, which is what decided it
 // under v3.
 app.timer('JobPoll', {
-    schedule: '0 */1 * * * *',
+    schedule: SCHEDULE,
     // No ScheduleMonitor: the app's own due check runs any outstanding occurrence within
     // its 30-minute grace window, so Azure's catch-up would be redundant -- and the blob
     // it needs is what failed at the start of this project.

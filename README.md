@@ -2,9 +2,8 @@
 
 Timer-triggered Azure Function that drives the MHC application's scheduled jobs.
 
-Deployed as the Azure Function App **`mhc-job-poll`** (resource group `Cron_group`,
-Southeast Asia). The repo name and the app name differ deliberately -- `deploy.sh` targets
-the app, and both are overridable with `APP=` / `RG=`.
+Deployed as the Azure Function App **`ws-scheduler`** (resource group `Cron_group`,
+Southeast Asia).
 
 Every minute it POSTs `/<tenant>/ws-cj/job/due` to each app instance. The instance reads
 `job_schedule` in that tenant's own database and runs whatever is outstanding — so this
@@ -118,57 +117,51 @@ A night when something ran:
 
 ## Deploy
 
-    ./deploy.sh
+From VS Code: **Azure Functions -> Deploy to Function App -> `ws-scheduler`**.
 
-Runs the test suite, packages `JobPoll/` plus `host.json`, and zip-deploys to Azure. It
-refuses to deploy if a test fails, so a broken build cannot reach the Function App.
+Or with the Azure Functions Core Tools:
 
-Override the target with environment variables:
+    func azure functionapp publish ws-scheduler
 
-    APP=Cron RG=Cron_group ./deploy.sh
-    FUNC_NAME=JobPoll ./deploy.sh
+**Run the tests first** -- nothing in the deploy path does it for you:
 
-**Prerequisites** -- the Azure CLI and a login, once per machine:
-
-    curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash     # Debian/Ubuntu/WSL
-    az login
-
-Azure Functions Core Tools (`func`) is *not* needed. The script uses
-`az functionapp deployment source config-zip`, which is one dependency instead of two.
+    node test/scenarios.js
 
 ### What gets deployed
 
     host.json
-    TimerTrigger1/function.json      the timer binding
-    TimerTrigger1/index.js           the handler
+    package.json
+    src/index.js        the handler and its app.timer registration
+    node_modules/       @azure/functions is needed at RUNTIME under the v4 model
 
-The **folder name inside the zip becomes the function name in Azure**. It is deployed as
-`TimerTrigger1` so the admin URL, portal Test/Run and existing Application Insights queries
-keep working; set `FUNC_NAME` to change it.
+The **function name comes from `app.timer('JobPoll', ...)`** in `src/index.js`, not from the
+folder name -- that was a v3 rule. Renaming `src/` changes nothing in Azure.
 
-`local.settings.json` and `test/` are never packaged -- the first holds credentials, and
-neither belongs in `wwwroot`.
+`local.settings.json` and `test/` are excluded by `.funcignore` -- the first holds
+credentials, and neither belongs in `wwwroot`.
 
-### Without the CLI
+## Changing how often it polls
 
-Portal -> Function App -> **Advanced Tools -> Go** -> **Tools -> Zip Push Deploy**, then drag
-the zip in. Nothing to install, and no credentials beyond being signed in to the portal.
+The schedule lives in `src/index.js`, as the `SCHEDULE` constant passed to `app.timer`:
 
-Pasting into **Code + Test** works too, but put the code in the function's *own* `index.js`.
-A file that `require`s another folder will fail with `Cannot find module`, because only the
-one function folder is deployed.
+    const SCHEDULE = '0 */1 * * * *';      // once a minute, on the minute
 
-## Change the schedule to once a minute
+It is deliberately **not** an app setting. This only controls how often the app is *asked*;
+what is actually DUE is decided by the app from its own `job_schedule` table. Changing a
+job's time is an UPDATE there, not a change here.
 
-The existing `TimerTrigger1` is `0 */5 * * * *`, i.e. every 5 minutes. That is too slow: a
-job due at 20:30 could be polled at 20:32 and, while the grace window would still run it,
-5-minute gaps leave a lot of room for drift. `function.json` here reads the schedule from
-an app setting so it can be changed without a redeploy:
+NCRONTAB is **6 fields** -- `second minute hour day month day-of-week`. That leading seconds
+field is the usual mistake, because ordinary cron has five:
 
-    JOB_POLL_SCHEDULE = 0 * * * * *        once a minute, on the minute
+| Expression | Fires |
+|---|---|
+| `0 * * * * *` | second 0 of every minute |
+| `0 */1 * * * *` | the same thing |
+| `*/30 * * * * *` | every 30 seconds |
+| `0 0 */1 * * *` | **every hour** -- reads like "every 1 minute", is not |
 
-NCRONTAB is 6 fields — `second minute hour day month day-of-week`. Every 30 seconds would
-be `*/30 * * * * *`, worth it only if invocations are actually being lost.
+Changing it needs a redeploy. Once a minute is right; a missed poll is absorbed by the
+app's 30-minute grace window, so there is nothing to gain from polling faster.
 
 ## App settings
 
@@ -177,7 +170,6 @@ be `*/30 * * * * *`, worth it only if invocations are actually being lost.
 | `JOB_POLL_TARGETS` | yes | JSON array of `{name, url}` — one per (tenant x app server) that exists |
 | `JOB_POLL_BASIC` | yes* | base64 of `user:password` for `verifyRequestAuthorize`. Use a Key Vault reference |
 | `JOB_POLL_USER` / `JOB_POLL_PASSWORD` | * | alternative to `JOB_POLL_BASIC`, convenient locally |
-| `JOB_POLL_SCHEDULE` | no | NCRONTAB, defaults to `0 * * * * *` (once a minute). `*/30 * * * * *` for every 30s |
 
 `JOB_POLL_TARGETS` must be **one line** — an app setting is a string, so paste the JSON
 with no line breaks. This is the value, exactly as it goes in the portal:
