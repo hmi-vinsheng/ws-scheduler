@@ -4,20 +4,21 @@
 #
 #   ./deploy.sh                      deploy to the default app
 #   APP=Cron RG=Cron_group ./deploy.sh
-#   FUNC_NAME=JobPoll ./deploy.sh    deploy under a different function name
 #
 # Requires the Azure CLI and a login:
 #   curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash     # Debian/Ubuntu/WSL
 #   az login
 #
-# The function's source of truth is JobPoll/. The folder name inside the zip decides the
-# function's name in Azure, and it is deployed as TimerTrigger1 so the admin URL, Test/Run
-# and the existing Application Insights queries keep working. Set FUNC_NAME to change it.
+# v4 programming model: there is no function.json and the folder name means nothing. The
+# function's name comes from the app.timer('JobPoll', ...) call in src/index.js, so this
+# script just ships the project as-is.
+#
+# node_modules IS deployed: the v4 model needs @azure/functions at runtime, unlike v3 which
+# had no dependencies at all.
 set -euo pipefail
 
 APP="${APP:-mhc-job-poll}"
 RG="${RG:-Cron_group}"
-FUNC_NAME="${FUNC_NAME:-TimerTrigger1}"
 
 cd "$(dirname "$0")"
 
@@ -41,16 +42,18 @@ echo
 echo "==> packaging"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
-mkdir -p "$STAGE/pkg/$FUNC_NAME"
-cp JobPoll/index.js      "$STAGE/pkg/$FUNC_NAME/index.js"
-cp JobPoll/function.json "$STAGE/pkg/$FUNC_NAME/function.json"
-cp host.json             "$STAGE/pkg/host.json"
+mkdir -p "$STAGE/pkg"
+cp -r src          "$STAGE/pkg/src"
+cp host.json       "$STAGE/pkg/host.json"
+cp package.json    "$STAGE/pkg/package.json"
+# Runtime dependencies only -- devDependencies have no business in wwwroot.
+( cd "$STAGE/pkg" && npm install --omit=dev --no-audit --no-fund --silent )
 # local.settings.json holds credentials and the host ignores it in Azure; test/ has no
 # business in wwwroot. Neither is copied, so neither can leak.
 ( cd "$STAGE/pkg" && zip -qr ../deploy.zip . )
 unzip -l "$STAGE/deploy.zip" | sed 's/^/    /'
 
-echo "==> deploying to $APP ($RG) as function '$FUNC_NAME'"
+echo "==> deploying to $APP ($RG)"
 az functionapp deployment source config-zip \
     --resource-group "$RG" --name "$APP" --src "$STAGE/deploy.zip"
 

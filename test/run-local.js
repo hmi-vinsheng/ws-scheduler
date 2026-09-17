@@ -57,25 +57,25 @@ function line(level, msg) {
     console.log(`  [${level.padEnd(7)}] ${msg}`);
 }
 
-// The shape the Functions v3 host passes in. Only the log family is used.
+// The shape the Functions v4 host passes in. Only the log family is used.
 const context = {
     invocationId: 'local-' + Date.now(),
-    log: Object.assign(function (m) { line('info', m); }, {
-        verbose: function (m) { line('verbose', m); },
-        info: function (m) { line('info', m); },
-        warn: function (m) { line('warn', m); },
-        error: function (m) { line('error', m); }
-    })
+    log:   function (m) { line('info', m); },
+    trace: function (m) { line('verbose', m); },
+    debug: function (m) { line('verbose', m); },
+    info:  function (m) { line('info', m); },
+    warn:  function (m) { line('warn', m); },
+    error: function (m) { line('error', m); }
 };
 
 const myTimer = { isPastDue: flag('--past-due'), scheduleStatus: {} };
 
-const handler = require(path.join(__dirname, '..', 'JobPoll', 'index.js'));
+const { jobPoll } = require(path.join(__dirname, '..', 'src', 'index.js'));
 
 console.log(`\ntargets: ${process.env.JOB_POLL_TARGETS}`);
 console.log('--- run ---');
 
-handler(context, myTimer).then(
+jobPoll(myTimer, context).then(
     function () {
         console.log('--- done ---');
         console.log(`levels: info=${counts.info} verbose=${counts.verbose} warn=${counts.warn} error=${counts.error}`);

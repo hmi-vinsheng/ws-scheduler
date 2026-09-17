@@ -16,7 +16,7 @@ const http = require('http');
 const path = require('path');
 
 const withSlow = process.argv.indexOf('--slow') >= 0;
-const handler = require(path.join(__dirname, '..', 'JobPoll', 'index.js'));
+const { jobPoll } = require(path.join(__dirname, '..', 'src', 'index.js'));
 
 let sawAuth = null;
 
@@ -46,12 +46,16 @@ function capture() {
     const push = function (level) { return function (m) { lines.push({ level: level, msg: String(m) }); }; };
     return {
         lines: lines,
+        // v4 context: log() is still the info-level function, but the severity helpers
+        // hang off context itself rather than off log.
         context: {
             invocationId: 'test',
-            log: Object.assign(push('info'), {
-                verbose: push('verbose'), info: push('info'),
-                warn: push('warn'), error: push('error')
-            })
+            log:   push('info'),
+            trace: push('verbose'),
+            debug: push('verbose'),
+            info:  push('info'),
+            warn:  push('warn'),
+            error: push('error')
         }
     };
 }
@@ -70,7 +74,8 @@ async function run(name, targets, env, pastDue) {
     const c = capture();
     let threw = null;
     try {
-        await handler(c.context, { isPastDue: !!pastDue });
+        // v4 argument order: (trigger, context)
+        await jobPoll({ isPastDue: !!pastDue }, c.context);
     } catch (e) {
         threw = e;
     }

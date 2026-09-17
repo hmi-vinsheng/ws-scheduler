@@ -1,6 +1,7 @@
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
+const { app } = require('@azure/functions');
 
 /**
  * Drives the MHC application's scheduled jobs.
@@ -202,7 +203,7 @@ async function pollOne(target, header, context) {
                 // 99% of polls land here -- nothing was due. Verbose so App Insights is
                 // not 6,000 lines a day of "nothing happened"; raise host.json logLevel
                 // to Trace when you need to see them.
-                context.log.verbose(
+                context.trace(
                     `${TAG} ${target.name}: idle, nothing due on node=${d.node} (${ms}ms)`
                 );
             }
@@ -222,7 +223,7 @@ async function pollOne(target, header, context) {
             return { target: target.name, outcome: 'in-flight', ms: ms };
         }
         if (res.status === 401) {
-            context.log.error(
+            context.error(
                 `${TAG} ${target.name}: 401 UNAUTHORIZED. Either JOB_POLL_BASIC is wrong, or ` +
                 `this function's outbound IP is not allowlisted in verifyRequestAuthorize. ` +
                 `url=${safeUrl(target.url)} (${ms}ms)`
@@ -230,14 +231,14 @@ async function pollOne(target, header, context) {
             return { target: target.name, outcome: 'unauthorized', ms: ms };
         }
         if (res.status === 404) {
-            context.log.error(
+            context.error(
                 `${TAG} ${target.name}: 404 NOT FOUND. The tenant context path is probably ` +
                 `wrong, or that tenant is not deployed on this box. url=${safeUrl(target.url)} (${ms}ms)`
             );
             return { target: target.name, outcome: 'not-found', ms: ms };
         }
 
-        context.log.error(
+        context.error(
             `${TAG} ${target.name}: HTTP ${res.status} url=${safeUrl(target.url)} ` +
             `body=${res.body} (${ms}ms)`
         );
@@ -247,7 +248,7 @@ async function pollOne(target, header, context) {
         // A warning, not an error: DR instances are unreachable by design, every minute.
         // Alert on a stale job_schedule.lastRunAt instead -- that catches an unreachable
         // box AND a dead function, which this log cannot.
-        context.log.warn(
+        context.warn(
             `${TAG} ${target.name}: NOT POLLED -- ${e.message}. ` +
             `url=${safeUrl(target.url)} (${ms}ms)`
         );
@@ -255,13 +256,20 @@ async function pollOne(target, header, context) {
     }
 }
 
-module.exports = async function (context, myTimer) {
+/**
+ * v4 programming model. Two differences from v3 that bite silently:
+ *   - the handler takes (trigger, context), the REVERSE of v3's (context, trigger)
+ *   - severity helpers live on context itself (context.warn) rather than on context.log
+ *     (context.log.warn), and calling the old form throws "is not a function"
+ * There is no function.json; the binding is declared in the app.timer call at the bottom.
+ */
+async function jobPoll(myTimer, context) {
     const runStarted = Date.now();
 
     if (myTimer && myTimer.isPastDue) {
         // The previous invocation was missed. Nothing to do differently: the app runs an
         // outstanding occurrence within its grace period regardless.
-        context.log.warn(
+        context.warn(
             `${TAG} invocation is PAST DUE -- a previous poll was missed. ` +
             `If this repeats, check the Function App is not being scaled to zero.`
         );
@@ -276,11 +284,11 @@ module.exports = async function (context, myTimer) {
         // Configuration is broken, so nothing can be polled. This one DOES throw, so the
         // invocation is marked failed and surfaces in Application Insights -- unlike a
         // per-target failure, a human has to fix this.
-        context.log.error(`${TAG} CONFIGURATION ERROR: ${e.message}`);
+        context.error(`${TAG} CONFIGURATION ERROR: ${e.message}`);
         throw e;
     }
 
-    context.log.verbose(
+    context.trace(
         `${TAG} polling ${targets.length} target(s) on schedule ` +
         `"${process.env.JOB_POLL_SCHEDULE || '(unset)'}": ` +
         targets.map(function (t) { return t.name; }).join(', ')
@@ -331,7 +339,7 @@ module.exports = async function (context, myTimer) {
     });
     if (broken.length) {
         // Distinct from "unreachable", which is expected for DR. These need a human.
-        context.log.error(
+        context.error(
             `${TAG} ATTENTION ${broken.length} target(s) misconfigured or failing: ` +
             broken.map(function (r) { return `${r.target} (${r.outcome})`; }).join(', ')
         );
@@ -339,9 +347,24 @@ module.exports = async function (context, myTimer) {
 
     if (totalMs > 45000) {
         // A run this slow risks overlapping the next minute's invocation.
-        context.log.warn(
+        context.warn(
             `${TAG} run took ${totalMs}ms, close to the polling interval -- ` +
             `check for slow or unreachable targets`
         );
     }
-};
+}
+
+// Registration replaces function.json. The name here is what appears in the portal, in the
+// admin URL and in Application Insights -- NOT the folder name, which is what decided it
+// under v3.
+app.timer('JobPoll', {
+    schedule: '0 */1 * * * *',
+    // No ScheduleMonitor: the app's own due check runs any outstanding occurrence within
+    // its 30-minute grace window, so Azure's catch-up would be redundant -- and the blob
+    // it needs is what failed at the start of this project.
+    useMonitor: false,
+    handler: jobPoll
+});
+
+// Exported so the tests can invoke the handler directly, without the Functions host.
+module.exports = { jobPoll };
